@@ -14,5 +14,6 @@
     "UseCSharp": true,
     "UseLargeWorlds": false,
     "UseDotNet": true
-  }
+  },
+  "EngineNickname": "our-cool-flax-engine"
 }
