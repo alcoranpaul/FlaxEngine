@@ -1550,9 +1550,9 @@ namespace FlaxEditor
                 // Handle case when Game window is not selected in tab view
                 var dockedTo = gameWin.ParentDockPanel;
                 if (dockedTo != null && dockedTo.SelectedTab != gameWin && dockedTo.SelectedTab != null)
-                    result = dockedTo.SelectedTab.Size * root.DpiScale;
+                    result = dockedTo.SelectedTab.Size;
                 else
-                    result = gameWin.Viewport.Size * root.DpiScale;
+                    result = gameWin.Viewport.Size;
 
                 result = Float2.Round(result);
             }
@@ -1685,9 +1685,6 @@ namespace FlaxEditor
         [LibraryImport("FlaxEngine", EntryPoint = "EditorInternal_CanSetToRoot", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
         [return: MarshalAs(UnmanagedType.U1)]
         internal static partial bool Internal_CanSetToRoot(IntPtr prefab, IntPtr newRoot);
-
-        [LibraryImport("FlaxEngine", EntryPoint = "EditorInternal_GetPrefabNestedObject", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
-        internal static partial void Internal_GetPrefabNestedObject(IntPtr prefabId, IntPtr prefabObjectId, IntPtr outPrefabId, IntPtr outPrefabObjectId);
 
         [LibraryImport("FlaxEngine", EntryPoint = "EditorInternal_GetAnimationTime", StringMarshalling = StringMarshalling.Custom, StringMarshallingCustomType = typeof(StringMarshaller))]
         internal static partial float Internal_GetAnimationTime(IntPtr animatedModel);

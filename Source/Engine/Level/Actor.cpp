@@ -3,6 +3,7 @@
 #include "Actor.h"
 #include "ActorsCache.h"
 #include "Level.h"
+#include "SceneQuery.h"
 #include "SceneObjectsFactory.h"
 #include "Scene/Scene.h"
 #include "Prefabs/Prefab.h"
@@ -14,6 +15,7 @@
 #include "Engine/Content/Content.h"
 #include "Engine/Core/Cache.h"
 #include "Engine/Core/Collections/CollectionPoolCache.h"
+#include "Engine/Core/Math/Double4x4.h"
 #include "Engine/Debug/Exceptions/JsonParseException.h"
 #include "Engine/Graphics/RenderTask.h"
 #include "Engine/Graphics/RenderView.h"
@@ -34,6 +36,10 @@
 #endif
 
 #define ACTOR_ORIENTATION_EPSILON 0.000000001f
+
+// Start loop over actor children/scripts from the beginning to account for any newly added or removed actors.
+#define ACTOR_LOOP_START_MODIFIED_HIERARCHY() _isHierarchyDirty = false
+#define ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY() if (_isHierarchyDirty) { _isHierarchyDirty = false; i = -1; }
 
 namespace
 {
@@ -72,6 +78,7 @@ Actor::Actor(const SpawnParams& params)
     , _isActiveInHierarchy(true)
     , _isPrefabRoot(false)
     , _isEnabled(false)
+    , _isHierarchyDirty(false)
     , _layer(0)
     , _staticFlags(StaticFlags::FullyStatic)
     , _localTransform(Transform::Identity)
@@ -97,7 +104,7 @@ void Actor::SetSceneInHierarchy(Scene* scene)
 
     for (int32 i = 0; i < Children.Count(); i++)
     {
-        Children[i]->SetSceneInHierarchy(scene);
+        Children.Get()[i]->SetSceneInHierarchy(scene);
     }
 }
 
@@ -107,9 +114,11 @@ void Actor::OnEnableInHierarchy()
     {
         OnEnable();
 
+        ACTOR_LOOP_START_MODIFIED_HIERARCHY();
         for (int32 i = 0; i < Children.Count(); i++)
         {
-            Children[i]->OnEnableInHierarchy();
+            Children.Get()[i]->OnEnableInHierarchy();
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
         }
     }
 }
@@ -118,9 +127,11 @@ void Actor::OnDisableInHierarchy()
 {
     if (IsActiveInHierarchy() && GetScene() && _isEnabled)
     {
+        ACTOR_LOOP_START_MODIFIED_HIERARCHY();
         for (int32 i = 0; i < Children.Count(); i++)
         {
-            Children[i]->OnDisableInHierarchy();
+            Children.Get()[i]->OnDisableInHierarchy();
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
         }
 
         OnDisable();
@@ -163,6 +174,7 @@ void Actor::OnDeleteObject()
         {
             // Unlink from the parent
             _parent->Children.RemoveKeepOrder(this);
+            _parent->_isHierarchyDirty = true;
             _parent = nullptr;
             _scene = nullptr;
         }
@@ -171,6 +183,7 @@ void Actor::OnDeleteObject()
     {
         // Unlink from the parent
         _parent->Children.RemoveKeepOrder(this);
+        _parent->_isHierarchyDirty = true;
         _parent = nullptr;
         _scene = nullptr;
     }
@@ -190,7 +203,7 @@ void Actor::OnDeleteObject()
 #endif
     for (int32 i = 0; i < Children.Count(); i++)
     {
-        auto e = Children[i];
+        auto e = Children.Get()[i];
         ASSERT(e->_parent == this);
         e->_parent = nullptr;
         e->DeleteObject();
@@ -206,7 +219,7 @@ void Actor::OnDeleteObject()
 #endif
     for (int32 i = 0; i < Scripts.Count(); i++)
     {
-        auto script = Scripts[i];
+        auto script = Scripts.Get()[i];
         ASSERT(script->_parent == this);
         if (script->_wasAwakeCalled)
         {
@@ -287,6 +300,7 @@ void Actor::SetParent(Actor* value, bool worldPositionsStays, bool canBreakPrefa
     if (_parent)
     {
         _parent->Children.RemoveKeepOrder(this);
+        _parent->_isHierarchyDirty = true;
     }
 
     // Set value
@@ -296,6 +310,7 @@ void Actor::SetParent(Actor* value, bool worldPositionsStays, bool canBreakPrefa
     if (_parent)
     {
         _parent->Children.Add(this);
+        _parent->_isHierarchyDirty = true;
     }
 
     // Sync scene change if need to
@@ -368,8 +383,6 @@ void Actor::SetOrderInParent(int32 index)
 {
     if (!_parent)
         return;
-
-    // Cache data
     auto& parentChildren = _parent->Children;
     const int32 currentIndex = parentChildren.Find(this);
     ASSERT(currentIndex != INVALID_INDEX);
@@ -378,8 +391,6 @@ void Actor::SetOrderInParent(int32 index)
     if (currentIndex != index)
     {
         parentChildren.RemoveAtKeepOrder(currentIndex);
-
-        // Check if index is invalid
         if (index < 0 || index >= parentChildren.Count())
         {
             // Append at the end
@@ -390,6 +401,7 @@ void Actor::SetOrderInParent(int32 index)
             // Change order
             parentChildren.Insert(index, this);
         }
+        _parent->_isHierarchyDirty = true;
 
         // Fire event
         OnOrderInParentChanged();
@@ -416,10 +428,21 @@ Actor* Actor::GetChild(const StringView& name) const
 Actor* Actor::GetChild(const MClass* type) const
 {
     CHECK_RETURN(type, nullptr);
-    for (auto child : Children)
+    if (type->IsInterface())
     {
-        if (child->GetClass()->IsSubClassOf(type))
-            return child;
+        for (auto child : Children)
+        {
+            if (child->GetClass()->HasInterface(type))
+                return child;
+        }
+    }
+    else
+    {
+        for (auto child : Children)
+        {
+            if (child->GetClass()->IsSubClassOf(type))
+                return child;
+        }
     }
     return nullptr;
 }
@@ -427,9 +450,18 @@ Actor* Actor::GetChild(const MClass* type) const
 Array<Actor*> Actor::GetChildren(const MClass* type) const
 {
     Array<Actor*> result;
-    for (auto child : Children)
-        if (child->GetClass()->IsSubClassOf(type))
-            result.Add(child);
+    if (type->IsInterface())
+    {
+        for (auto child : Children)
+            if (child->GetClass()->HasInterface(type))
+                result.Add(child);
+    }
+    else
+    {
+        for (auto child : Children)
+            if (child->GetClass()->IsSubClassOf(type))
+                result.Add(child);
+    }
     return result;
 }
 
@@ -784,6 +816,27 @@ void Actor::GetLocalToWorldMatrix(Matrix& localToWorld) const
 #endif
 }
 
+void Actor::GetWorldToLocalMatrix(Double4x4& worldToLocal) const
+{
+    GetLocalToWorldMatrix(worldToLocal);
+    worldToLocal.Invert();
+}
+
+void Actor::GetLocalToWorldMatrix(Double4x4& localToWorld) const
+{
+#if 0
+    _transform.GetWorld(localToWorld);
+#else
+    _localTransform.GetWorld(localToWorld);
+    if (_parent)
+    {
+        Double4x4 parentToWorld;
+        _parent->GetLocalToWorldMatrix(parentToWorld);
+        localToWorld = localToWorld * parentToWorld;
+    }
+#endif
+}
+
 void Actor::LinkPrefab(const Guid& prefabId, const Guid& prefabObjectId)
 {
     ASSERT(prefabId.IsValid());
@@ -851,9 +904,7 @@ void Actor::BreakPrefabLink()
 
 void Actor::Initialize()
 {
-#if ENABLE_ASSERTION
-    CHECK(!IsDuringPlay());
-#endif
+    CHECK_DEBUG(!IsDuringPlay());
 
     // Cache
     if (_parent)
@@ -867,9 +918,7 @@ void Actor::Initialize()
 
 void Actor::BeginPlay(SceneBeginData* data)
 {
-#if ENABLE_ASSERTION
-    CHECK(!IsDuringPlay());
-#endif
+    CHECK_DEBUG(!IsDuringPlay());
 
     // Set flag
     Flags |= ObjectFlags::IsDuringPlay;
@@ -877,11 +926,15 @@ void Actor::BeginPlay(SceneBeginData* data)
     OnBeginPlay();
 
     // Update scripts
+    ACTOR_LOOP_START_MODIFIED_HIERARCHY();
     for (int32 i = 0; i < Scripts.Count(); i++)
     {
         auto e = Scripts.Get()[i];
         if (!e->IsDuringPlay())
+        {
             e->BeginPlay(data);
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
+        }
     }
 
     // Update children
@@ -889,7 +942,10 @@ void Actor::BeginPlay(SceneBeginData* data)
     {
         auto e = Children.Get()[i];
         if (!e->IsDuringPlay())
+        {
             e->BeginPlay(data);
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
+        }
     }
 
     // Fire events for scripting
@@ -901,9 +957,7 @@ void Actor::BeginPlay(SceneBeginData* data)
 
 void Actor::EndPlay()
 {
-#if ENABLE_ASSERTION
-    CHECK(IsDuringPlay());
-#endif
+    CHECK_DEBUG(IsDuringPlay());
 
     // Fire event for scripting
     if (IsActiveInHierarchy() && GetScene())
@@ -930,19 +984,27 @@ void Actor::EndPlay()
     Flags &= ~ObjectFlags::IsDuringPlay;
 
     // Call event deeper
+    ACTOR_LOOP_START_MODIFIED_HIERARCHY();
     for (int32 i = 0; i < Children.Count(); i++)
     {
         auto e = Children.Get()[i];
         if (e->IsDuringPlay())
+        {
             e->EndPlay();
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
+        }
     }
 
     // Inform attached scripts
+    ACTOR_LOOP_START_MODIFIED_HIERARCHY();
     for (int32 i = 0; i < Scripts.Count(); i++)
     {
         auto e = Scripts.Get()[i];
         if (e->IsDuringPlay())
+        {
             e->EndPlay();
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
+        }
     }
 
     // Cleanup managed object
@@ -1141,31 +1203,34 @@ void Actor::Deserialize(DeserializeStream& stream, ISerializeModifier* modifier)
 
 void Actor::OnEnable()
 {
-#if ENABLE_ASSERTION
-    CHECK(!_isEnabled);
-#endif
+    CHECK_DEBUG(!_isEnabled);
     _isEnabled = true;
 
+    ACTOR_LOOP_START_MODIFIED_HIERARCHY();
     for (int32 i = 0; i < Scripts.Count(); i++)
     {
         auto script = Scripts[i];
         if (script->GetEnabled() && !script->_wasStartCalled)
+        {
             script->Start();
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
+        }
     }
 
     for (int32 i = 0; i < Scripts.Count(); i++)
     {
         auto script = Scripts[i];
         if (script->GetEnabled() && !script->_wasEnableCalled)
+        {
             script->Enable();
+            ACTOR_LOOP_CHECK_MODIFIED_HIERARCHY();
+        }
     }
 }
 
 void Actor::OnDisable()
 {
-#if ENABLE_ASSERTION
-    CHECK(_isEnabled);
-#endif
+    CHECK_DEBUG(_isEnabled);
     _isEnabled = false;
 
     for (int32 i = Scripts.Count() - 1; i >= 0; i--)
@@ -1252,12 +1317,8 @@ void Actor::OnLayerChanged()
 BoundingBox Actor::GetBoxWithChildren() const
 {
     BoundingBox result = GetBox();
-
     for (int32 i = 0; i < Children.Count(); i++)
-    {
-        BoundingBox::Merge(result, Children[i]->GetBoxWithChildren(), result);
-    }
-
+        BoundingBox::Merge(result, Children.Get()[i]->GetBoxWithChildren(), result);
     return result;
 }
 
@@ -1272,9 +1333,7 @@ BoundingBox Actor::GetEditorBoxChildren() const
 {
     BoundingBox result = GetEditorBox();
     for (int32 i = 0; i < Children.Count(); i++)
-    {
-        BoundingBox::Merge(result, Children[i]->GetEditorBoxChildren(), result);
-    }
+        BoundingBox::Merge(result, Children.Get()[i]->GetEditorBoxChildren(), result);
     return result;
 }
 
@@ -1418,7 +1477,7 @@ Actor* Actor::FindActor(const MClass* type, bool activeOnly) const
     CHECK_RETURN(type, nullptr);
     if (activeOnly && !_isActive)
         return nullptr;
-    if (GetClass()->IsSubClassOf(type))
+    if ((GetClass()->IsSubClassOf(type) || GetClass()->HasInterface(type)))
         return const_cast<Actor*>(this);
     for (auto child : Children)
     {
@@ -1432,7 +1491,7 @@ Actor* Actor::FindActor(const MClass* type, bool activeOnly) const
 Actor* Actor::FindActor(const MClass* type, const StringView& name) const
 {
     CHECK_RETURN(type, nullptr);
-    if (GetClass()->IsSubClassOf(type) && _name == name)
+    if ((GetClass()->IsSubClassOf(type) || GetClass()->HasInterface(type)) && _name == name)
         return const_cast<Actor*>(this);
     for (auto child : Children)
     {
@@ -1448,7 +1507,7 @@ Actor* Actor::FindActor(const MClass* type, const Tag& tag, bool activeOnly) con
     CHECK_RETURN(type, nullptr);
     if (activeOnly && !_isActive)
         return nullptr;
-    if (GetClass()->IsSubClassOf(type) && HasTag(tag))
+    if ((GetClass()->IsSubClassOf(type) || GetClass()->HasInterface(type)) && HasTag(tag))
         return const_cast<Actor*>(this);
     for (auto child : Children)
     {
@@ -1462,10 +1521,21 @@ Actor* Actor::FindActor(const MClass* type, const Tag& tag, bool activeOnly) con
 Script* Actor::FindScript(const MClass* type) const
 {
     CHECK_RETURN(type, nullptr);
-    for (auto script : Scripts)
+    if (type->IsInterface())
     {
-        if (script->GetClass()->IsSubClassOf(type) || script->GetClass()->HasInterface(type))
-            return script;
+        for (const auto script : Scripts)
+        {
+            if (script->GetClass()->HasInterface(type))
+                return script;
+        }
+    }
+    else
+    {
+        for (const auto script : Scripts)
+        {
+            if (script->GetClass()->IsSubClassOf(type))
+                return script;
+        }
     }
     for (auto child : Children)
     {
@@ -1880,8 +1950,7 @@ String Actor::ToJson()
     CompactJsonWriter writer(buffer);
     writer.SceneObject(this);
     String result;
-    const char* c = buffer.GetString();
-    result.SetUTF8(c, (int32)buffer.GetSize());
+    result.SetUTF8(buffer.GetString(), (int32)buffer.GetSize());
     return result;
 }
 
@@ -1907,6 +1976,41 @@ void Actor::FromJson(const StringAnsiView& json)
     Deserialize(document, &*modifier);
     Scripting::ObjectsLookupIdMapping.Set(nullptr);
     OnTransformChanged();
+}
+
+Actor* Actor::Clone()
+{
+    // Collect actors to clone
+    auto actors = ActorsCache::ActorsListCache.Get();
+    actors->Add(this);
+    SceneQuery::GetAllActors(this, *actors);
+
+    // Serialize objects
+    MemoryWriteStream stream;
+    if (ToBytes(*actors, stream))
+        return nullptr;
+
+    // Remap object ids into a new ones
+    auto modifier = Cache::ISerializeModifier.Get();
+    for (int32 i = 0; i < actors->Count(); i++)
+    {
+        auto actor = actors->At(i);
+        if (!actor)
+            continue;
+        modifier->IdsMapping.Add(actor->GetID(), Guid::New());
+        for (int32 j = 0; j < actor->Scripts.Count(); j++)
+        {
+            const auto script = actor->Scripts[j];
+            if (script)
+                modifier->IdsMapping.Add(script->GetID(), Guid::New());
+        }
+    }
+
+    // Deserialize objects
+    Array<Actor*> output;
+    if (FromBytes(ToSpan(stream.GetHandle(), (int32)stream.GetPosition()), output, modifier.Value) || output.IsEmpty())
+        return nullptr;
+    return output[0];
 }
 
 void Actor::SetPhysicsScene(PhysicsScene* scene)

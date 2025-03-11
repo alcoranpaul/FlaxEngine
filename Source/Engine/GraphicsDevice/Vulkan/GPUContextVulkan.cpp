@@ -557,14 +557,9 @@ void GPUContextVulkan::UpdateDescriptorSets(const SpirvShaderDescriptorInfo& des
                 VkBuffer buffer = VK_NULL_HANDLE;
                 VkDeviceSize offset = 0, range = 0;
                 uint32 dynamicOffset = 0;
-                if (handle)
-                    handle->DescriptorAsDynamicUniformBuffer(this, buffer, offset, range, dynamicOffset);
-                else
-                {
-                    const auto dummy = _device->HelperResources.GetDummyBuffer();
-                    buffer = dummy->GetHandle();
-                    range = dummy->GetSize();
-                }
+                if (!handle)
+                    handle = (GPUConstantBufferVulkan*)_device->HelperResources.GetDummyConstantBuffer();
+                handle->DescriptorAsDynamicUniformBuffer(this, buffer, offset, range, dynamicOffset);
                 needsWrite |= dsWriter.WriteDynamicUniformBuffer(descriptorIndex, buffer, offset, range, dynamicOffset, index);
                 break;
             }
@@ -1001,7 +996,11 @@ void GPUContextVulkan::BindCB(int32 slot, GPUConstantBuffer* cb)
 
 void GPUContextVulkan::BindSR(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_SR_BINDED);
+    if (view && ((DescriptorOwnerResourceVulkan*)view->GetNativePtr())->HasSRV() == false)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::SRV);
+#endif
     const auto handle = view ? (DescriptorOwnerResourceVulkan*)view->GetNativePtr() : nullptr;
     if (_srHandles[slot] != handle)
     {
@@ -1013,7 +1012,11 @@ void GPUContextVulkan::BindSR(int32 slot, GPUResourceView* view)
 
 void GPUContextVulkan::BindUA(int32 slot, GPUResourceView* view)
 {
+#if !BUILD_RELEASE
     ASSERT(slot >= 0 && slot < GPU_MAX_UA_BINDED);
+    if (view && ((DescriptorOwnerResourceVulkan*)view->GetNativePtr())->HasUAV() == false)
+        LogInvalidResourceUsage(slot, view, InvalidBindPoint::UAV);
+#endif
     const auto handle = view ? (DescriptorOwnerResourceVulkan*)view->GetNativePtr() : nullptr;
     if (_uaHandles[slot] != handle)
     {

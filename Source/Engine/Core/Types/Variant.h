@@ -146,7 +146,7 @@ DEFINE_DEFAULT_FORMATTING_VIA_TO_STRING(VariantType);
 API_STRUCT(InBuild) struct FLAXENGINE_API Variant
 {
     /// <summary>
-    /// Thee value type.
+    /// The value type.
     /// </summary>
     VariantType Type;
 
@@ -409,6 +409,8 @@ public:
         v.CopyStructure((void*)&value);
         return MoveTemp(v);
     }
+
+    static Variant Typename(const StringAnsiView& value);
 
     static bool CanCast(const Variant& v, const VariantType& to);
     static Variant Cast(const Variant& v, const VariantType& to);

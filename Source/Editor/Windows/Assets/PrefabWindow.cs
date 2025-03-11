@@ -1,6 +1,7 @@
 // Copyright (c) 2012-2024 Wojciech Figat. All rights reserved.
 
 using System;
+using System.Collections.Generic;
 using System.Xml;
 using FlaxEditor.Content;
 using FlaxEditor.CustomEditors;
@@ -19,7 +20,7 @@ namespace FlaxEditor.Windows.Assets
     /// </summary>
     /// <seealso cref="Prefab" />
     /// <seealso cref="FlaxEditor.Windows.Assets.AssetEditorWindow" />
-    public sealed partial class PrefabWindow : AssetEditorWindowBase<Prefab>, IPresenterOwner
+    public sealed partial class PrefabWindow : AssetEditorWindowBase<Prefab>, IPresenterOwner, ISceneEditingContext
     {
         private readonly SplitPanel _split1;
         private readonly SplitPanel _split2;
@@ -53,6 +54,9 @@ namespace FlaxEditor.Windows.Assets
         /// Gets the viewport.
         /// </summary>
         public PrefabWindowViewport Viewport => _viewport;
+
+        /// <inheritdoc />
+        public List<SceneGraphNode> Selection => _selection;
 
         /// <summary>
         /// Gets the prefab objects properties editor.
@@ -212,8 +216,8 @@ namespace FlaxEditor.Windows.Assets
             InputActions.Add(options => options.Paste, Paste);
             InputActions.Add(options => options.Duplicate, Duplicate);
             InputActions.Add(options => options.Delete, Delete);
-            InputActions.Add(options => options.Rename, Rename);
-            InputActions.Add(options => options.FocusSelection, _viewport.FocusSelection);
+            InputActions.Add(options => options.Rename, RenameSelection);
+            InputActions.Add(options => options.FocusSelection, FocusSelection);
         }
 
         /// <summary>
@@ -355,11 +359,20 @@ namespace FlaxEditor.Windows.Assets
         private void OnPrefabOpened()
         {
             _viewport.Prefab = _asset;
-            _viewport.UpdateGizmoMode();
+            if (Editor.ProjectCache.TryGetCustomData($"UIMode:{_asset.ID}", out bool value))
+                _viewport.SetInitialUIMode(value);
+            else
+                _viewport.SetInitialUIMode(_viewport._hasUILinked);
+            _viewport.UIModeToggled += OnUIModeToggled;
             Graph.MainActor = _viewport.Instance;
             Selection.Clear();
             Select(Graph.Main);
             Graph.Root.TreeNode.Expand(true);
+        }
+
+        private void OnUIModeToggled(bool value)
+        {
+            Editor.ProjectCache.SetCustomData($"UIMode:{_asset.ID}", value);
         }
 
         /// <inheritdoc />
@@ -548,5 +561,8 @@ namespace FlaxEditor.Windows.Assets
 
         /// <inheritdoc />
         public EditorViewport PresenterViewport => _viewport;
+
+        /// <inheritdoc />
+        EditorViewport ISceneEditingContext.Viewport => Viewport;
     }
 }
